@@ -188,7 +188,7 @@ app.post('/api/upload', upload.single('photo'), async (req, res) => {
 
     const photoId = uuidv4();
     const filename = req.file.filename;
-    const imagePath = path.join(__dirname, 'uploads', filename);
+    const imagePath = path.join(process.cwd(), 'uploads', filename);
 
     try {
         // Use AI to detect objects in the image
