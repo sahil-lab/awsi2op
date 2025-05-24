@@ -397,7 +397,7 @@ const startServer = () => {
 };
 
 // Only start the server if not in a serverless environment (like Vercel)
-if (process.env.NODE_ENV !== 'production' || !process.env.VERCEL) {
+if (process.env.NODE_ENV !== 'production' && !process.env.VERCEL) {
     startServer();
 }
 
