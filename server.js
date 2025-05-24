@@ -28,39 +28,96 @@ const S3_BUCKET = process.env.S3_BUCKET_NAME;
 
 // MongoDB Connection
 const uri = process.env.MONGODB_URI;
-const client = new MongoClient(uri);
-let db;
-let photosCollection;
+let cachedClient = null;
+let cachedDb = null;
+let cachedCollection = null;
 
 async function connectToMongoDB() {
     try {
+        // If we already have a connection, use it
+        if (cachedClient && cachedCollection) {
+            console.log('Using cached MongoDB connection');
+            return cachedCollection;
+        }
+
+        // If no connection, create a new one
+        console.log('Creating new MongoDB connection');
+
+        // Configure the MongoDB client
+        const client = new MongoClient(uri, {
+            useNewUrlParser: true,
+            useUnifiedTopology: true,
+            serverSelectionTimeoutMS: 5000 // 5 second timeout
+        });
+
+        // Connect to the client
         await client.connect();
         console.log('Connected to MongoDB');
-        db = client.db('photo-description-app');
-        photosCollection = db.collection('photos');
-        return photosCollection;
+
+        // Get reference to the database
+        const db = client.db('photo-description-app');
+
+        // Get reference to the collection
+        const collection = db.collection('photos');
+
+        // Test the connection by performing a simple operation
+        await collection.stats();
+        console.log('Successfully verified collection access');
+
+        // Cache the client, db and collection for reuse
+        cachedClient = client;
+        cachedDb = db;
+        cachedCollection = collection;
+
+        return collection;
     } catch (error) {
-        console.error('Error connecting to MongoDB:', error);
-        throw error;
+        console.error('MongoDB connection error:', error);
+
+        // Reset cache on connection error
+        cachedClient = null;
+        cachedDb = null;
+        cachedCollection = null;
+
+        throw new Error(`Failed to connect to MongoDB: ${error.message}`);
     }
 }
 
 // Ensure the database is connected
 async function ensureDbConnected() {
-    if (!photosCollection) {
-        console.log('Database not connected yet, connecting now...');
+    try {
+        // Try to get the cached connection or create a new one
         return await connectToMongoDB();
+    } catch (error) {
+        console.error('Error ensuring database connection:', error);
+        throw error;
     }
-    return photosCollection;
 }
 
 // Connect to MongoDB when the server starts
-connectToMongoDB().catch(console.error);
+if (process.env.NODE_ENV !== 'production') {
+    // Only connect on startup in development environment
+    connectToMongoDB().catch(console.error);
+}
 
 // Middleware
 app.use(cors());
 app.use(express.json());
 app.use(express.static('public'));
+
+// Add a middleware to check database connection for all API routes
+app.use('/api', async (req, res, next) => {
+    try {
+        // Ensure database connection for all API routes
+        await ensureDbConnected();
+        next();
+    } catch (error) {
+        console.error('Database middleware error:', error);
+        return res.status(500).json({
+            success: false,
+            error: 'Database connection error: ' + error.message
+        });
+    }
+});
 
 // Create uploads directory if it doesn't exist
 const uploadsDir = path.join(process.cwd(), 'uploads');
@@ -74,16 +131,7 @@ try {
 }
 
 // Configure multer for file uploads
-const storage = multer.diskStorage({
-    destination: function (req, file, cb) {
-        cb(null, uploadsDir);
-    },
-    filename: function (req, file, cb) {
-        const uniqueName = uuidv4() + path.extname(file.originalname);
-        cb(null, uniqueName);
-    }
-});
-
+const storage = multer.memoryStorage(); // Use memory storage instead of disk storage
 const upload = multer({ storage: storage });
 
 // AI-powered object detection function using OpenAI Vision API
@@ -240,8 +288,7 @@ app.post('/api/upload', upload.single('photo'), async (req, res) => {
         console.log('File received:', req.file.originalname, req.file.mimetype, req.file.size);
 
         const photoId = uuidv4();
-        const filename = req.file.filename;
-        const fileKey = `photos/${photoId}`;
+        const filename = `${photoId}${path.extname(req.file.originalname)}`;
 
         console.log('Generated photoId:', photoId);
 
@@ -250,113 +297,77 @@ app.post('/api/upload', upload.single('photo'), async (req, res) => {
             const fileInfo = await uploadFile(req.file, filename);
             console.log('File uploaded to:', fileInfo.storage);
 
-            // Get the local path for AI processing
-            let imagePath;
-            if (fileInfo.isLocal) {
-                imagePath = path.join(process.cwd(), 'uploads', filename);
-            } else {
-                // If using storage, we still have the local file until it's deleted after upload
-                imagePath = req.file.path;
-            }
-
-            console.log('Using image path for AI:', imagePath);
+            // Process the image with AI
+            let detectedObjects = [];
+            let description = 'Image uploaded successfully';
 
             try {
-                // Use AI to detect objects in the image
-                const detectedObjects = await detectObjectsInImage(imagePath);
+                if (fileInfo.storage === 's3') {
+                    // For S3, we need to get the file from S3 or use the buffer directly
+                    console.log('Processing image from buffer...');
+                    detectedObjects = await processImageBuffer(req.file.buffer, req.file.mimetype);
+                } else {
+                    // For local storage (unlikely in serverless)
+                    const imagePath = path.join(process.cwd(), 'uploads', filename);
+                    console.log('Processing image from path:', imagePath);
+                    detectedObjects = await detectObjectsInImage(imagePath);
+                }
+
                 console.log('AI detection complete, objects found:', detectedObjects.length);
 
                 // Create a description from detected objects
                 const objectNames = detectedObjects.map(obj => obj.name).join(', ');
-                const description = detectedObjects.length > 0
+                description = detectedObjects.length > 0
                     ? `Objects detected: ${objectNames}`
                     : 'No specific objects detected';
+            } catch (aiError) {
+                console.error('Error processing image with AI:', aiError);
+                // Continue with empty objects
+            }
 
-                // Create metadata with detected objects
-                const metadata = {
-                    id: photoId,
-                    originalName: req.file.originalname,
+            // Create metadata with detected objects
+            const metadata = {
+                id: photoId,
+                originalName: req.file.originalname,
+                filename: fileInfo.key,
+                fileUrl: fileInfo.url,
+                isLocalStorage: fileInfo.isLocal,
+                size: req.file.size,
+                mimetype: req.file.mimetype,
+                description: description,
+                detectedObjects: detectedObjects,
+                objectCategories: [...new Set(detectedObjects.map(obj => obj.category || 'Uncategorized'))],
+                analysisTimestamp: new Date().toISOString(),
+                uploadedAt: new Date().toISOString(),
+                storage: fileInfo.storage
+            };
+
+            console.log('Saving to MongoDB...');
+
+            // Ensure DB connection is established
+            const collection = await ensureDbConnected();
+
+            // Store in MongoDB
+            try {
+                const result = await collection.insertOne({
+                    _id: photoId,
                     filename: fileInfo.key,
                     fileUrl: fileInfo.url,
                     isLocalStorage: fileInfo.isLocal,
-                    size: req.file.size,
-                    mimetype: req.file.mimetype,
                     description: description,
-                    detectedObjects: detectedObjects,
-                    objectCategories: [...new Set(detectedObjects.map(obj => obj.category || 'Uncategorized'))],
-                    analysisTimestamp: new Date().toISOString(),
-                    uploadedAt: new Date().toISOString()
-                };
+                    metadata: metadata,
+                    created_at: new Date()
+                });
 
-                console.log('Saving to MongoDB...');
+                console.log('MongoDB save successful:', result.insertedId);
 
-                // Ensure DB connection is established
-                const collection = await ensureDbConnected();
-
-                // Store in MongoDB
-                try {
-                    const result = await collection.insertOne({
-                        _id: photoId,
-                        filename: fileInfo.key,
-                        fileUrl: fileInfo.url,
-                        isLocalStorage: fileInfo.isLocal,
-                        description: description,
-                        metadata: metadata,
-                        created_at: new Date()
-                    });
-
-                    console.log('MongoDB save successful:', result.insertedId);
-
-                    return res.json({
-                        success: true,
-                        data: metadata
-                    });
-                } catch (dbError) {
-                    console.error('Database error:', dbError);
-                    return res.status(500).json({ success: false, error: 'Database error: ' + dbError.message });
-                }
-            } catch (aiError) {
-                console.error('Error processing image with AI:', aiError);
-
-                // Fallback to basic metadata if AI processing fails
-                const metadata = {
-                    id: photoId,
-                    originalName: req.file.originalname,
-                    filename: fileKey,
-                    fileUrl: fileInfo.url,
-                    isLocalStorage: fileInfo.isLocal,
-                    size: req.file.size,
-                    mimetype: req.file.mimetype,
-                    description: 'Image uploaded successfully',
-                    detectedObjects: [],
-                    objectCategories: [],
-                    analysisTimestamp: null,
-                    uploadedAt: new Date().toISOString(),
-                    error: 'Object detection failed'
-                };
-
-                try {
-                    // Ensure DB connection is established
-                    const collection = await ensureDbConnected();
-
-                    const result = await collection.insertOne({
-                        _id: photoId,
-                        filename: fileKey,
-                        fileUrl: fileInfo.url,
-                        isLocalStorage: fileInfo.isLocal,
-                        description: metadata.description,
-                        metadata: metadata,
-                        created_at: new Date()
-                    });
-
-                    return res.json({
-                        success: true,
-                        data: metadata
-                    });
-                } catch (dbError) {
-                    console.error('Database error:', dbError);
-                    return res.status(500).json({ success: false, error: 'Database error: ' + dbError.message });
-                }
+                return res.json({
+                    success: true,
+                    data: metadata
+                });
+            } catch (dbError) {
+                console.error('Database error:', dbError);
+                return res.status(500).json({ success: false, error: 'Database error: ' + dbError.message });
             }
         } catch (error) {
             console.error('Error processing image:', error);
@@ -489,6 +500,85 @@ app.use(express.static(path.join(__dirname, 'public')));
 // Make uploads directory accessible
 app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
 
+// Function to process image directly from buffer
+async function processImageBuffer(imageBuffer, mimeType) {
+    try {
+        // Convert buffer to base64
+        const base64Image = imageBuffer.toString('base64');
+
+        const response = await openai.chat.completions.create({
+            model: "gpt-4o-mini",
+            messages: [
+                {
+                    role: "user",
+                    content: [
+                        {
+                            type: "text",
+                            text: "Analyze this image and identify all visible objects in it. Be comprehensive and specific. For each object, include:\n\n1. The name of the object\n2. A confidence score between 0 and 1\n3. A brief description of the object's appearance\n4. The category it belongs to (e.g., furniture, electronic, food, clothing, etc.)\n\nRespond ONLY with a valid JSON array containing objects with this exact structure:\n[{\"name\": \"object_name\", \"confidence\": 0.95, \"description\": \"brief description\", \"category\": \"object_category\"}]\n\nDo not include any explanations, markdown formatting, or text outside of the JSON array."
+                        },
+                        {
+                            type: "image_url",
+                            image_url: {
+                                url: `data:${mimeType};base64,${base64Image}`,
+                                detail: "high"
+                            }
+                        }
+                    ]
+                }
+            ],
+            max_tokens: 1500
+        });
+
+        // Process response similar to detectObjectsInImage
+        if (!response || !response.choices || !response.choices[0] || !response.choices[0].message) {
+            console.error('Invalid OpenAI response structure:', response);
+            return getFallbackObjects();
+        }
+
+        const content = response.choices[0].message.content;
+
+        if (!content || typeof content !== 'string') {
+            console.error('Empty or invalid content in OpenAI response');
+            return getFallbackObjects();
+        }
+
+        // Clean the response and try to parse JSON
+        let cleanContent = content.trim();
+
+        // Remove any markdown formatting if present
+        if (cleanContent.startsWith('```json')) {
+            cleanContent = cleanContent.replace(/```json\s*/, '').replace(/```\s*$/, '');
+        } else if (cleanContent.startsWith('```')) {
+            cleanContent = cleanContent.replace(/```\s*/, '').replace(/```\s*$/, '');
+        }
+
+        try {
+            const objects = JSON.parse(cleanContent);
+            console.log("Detected objects:", JSON.stringify(objects, null, 2));
+
+            if (!Array.isArray(objects)) {
+                console.error('OpenAI response is not an array:', objects);
+                return getFallbackObjects();
+            }
+
+            const validObjects = objects.filter(obj =>
+                obj && typeof obj === 'object' &&
+                obj.name && typeof obj.name === 'string' &&
+                typeof obj.confidence === 'number'
+            );
+
+            return validObjects;
+        } catch (parseError) {
+            console.error('Error parsing OpenAI response:', parseError);
+            console.log('Raw response content:', content);
+            return extractObjectsFromText(content);
+        }
+    } catch (error) {
+        console.error('Error processing image buffer with AI:', error);
+        return getFallbackObjects();
+    }
+}
+
 // Function to upload file to AWS S3
 async function uploadFileToS3(file, key) {
     try {
@@ -499,8 +589,17 @@ async function uploadFileToS3(file, key) {
             return null; // Return null to indicate fallback should be used
         }
 
-        // Read file data
-        const fileData = fs.readFileSync(file.path);
+        // Get file data (either from buffer or path)
+        let fileData;
+        if (file.buffer) {
+            // If file is in memory (multer memory storage)
+            fileData = file.buffer;
+        } else if (file.path) {
+            // If file is on disk (multer disk storage)
+            fileData = fs.readFileSync(file.path);
+        } else {
+            throw new Error('Invalid file object - no buffer or path');
+        }
 
         // Upload to S3
         const params = {
@@ -515,11 +614,14 @@ async function uploadFileToS3(file, key) {
         const data = await s3.upload(params).promise();
         console.log('S3 upload successful:', data.Location);
 
-        // Delete local file after successful upload
-        try {
-            fs.unlinkSync(file.path);
-        } catch (unlinkError) {
-            console.warn('Could not delete local file after S3 upload:', unlinkError);
+        // Delete local file if it exists
+        if (file.path) {
+            try {
+                fs.unlinkSync(file.path);
+                console.log('Deleted local file after S3 upload');
+            } catch (unlinkError) {
+                console.warn('Could not delete local file after S3 upload:', unlinkError);
+            }
         }
 
         return {
@@ -539,36 +641,57 @@ async function uploadFile(file, filename) {
     try {
         console.log('Starting file upload process for:', filename);
 
-        // Try S3 first if configured
+        // In serverless environment, we should always try S3 first
         if (process.env.AWS_ACCESS_KEY_ID && process.env.S3_BUCKET_NAME) {
-            const fileExtension = path.extname(file.originalname);
-            const s3Key = `${filename}${fileExtension}`;
-            const s3Result = await uploadFileToS3(file, s3Key);
+            const s3Result = await uploadFileToS3(file, filename);
 
             if (s3Result) {
                 console.log('Successfully uploaded to S3');
                 return s3Result;
             }
             console.log('S3 upload failed, falling back to local storage...');
+        } else {
+            console.log('S3 credentials not found');
         }
 
         // Fallback to local storage if S3 fails or is not configured
-        console.log('Using local filesystem for storage');
+        // Note: This won't work reliably in serverless environments like Vercel
+        console.log('Using local filesystem for storage (not recommended for serverless)');
+
+        // If we're using memory storage, we need to write the file to disk
+        if (file.buffer) {
+            try {
+                // Create uploads directory if it doesn't exist
+                if (!fs.existsSync(uploadsDir)) {
+                    fs.mkdirSync(uploadsDir, { recursive: true });
+                }
+
+                const filePath = path.join(uploadsDir, filename);
+                fs.writeFileSync(filePath, file.buffer);
+                console.log('Wrote file to local path:', filePath);
+
+                file.filename = filename;
+            } catch (writeError) {
+                console.error('Error writing buffer to file:', writeError);
+                // Continue with memory-only version
+            }
+        }
+
         return {
             isLocal: true,
-            key: file.filename,
-            url: `/uploads/${file.filename}`,
+            key: filename,
+            url: `/uploads/${filename}`,
             storage: 'local'
         };
     } catch (error) {
         console.error('Error in file upload process:', error);
 
-        // Ultimate fallback to local storage
+        // Ultimate fallback - just return the metadata without storage
         return {
             isLocal: true,
-            key: file.filename,
-            url: `/uploads/${file.filename}`,
-            storage: 'local',
+            key: filename,
+            url: `/uploads/${filename}`,
+            storage: 'error',
             error: error.message
         };
     }
@@ -652,7 +775,7 @@ if (process.env.NODE_ENV !== 'production' && !process.env.VERCEL) {
 // Graceful shutdown
 process.on('SIGINT', async () => {
     try {
-        await client.close();
+        await cachedClient.close();
         console.log('MongoDB connection closed.');
         process.exit(0);
     } catch (error) {
