@@ -359,23 +359,41 @@ app.delete('/api/photos/:id', async (req, res) => {
 
 // Start server with port fallback mechanism
 const startServer = () => {
-    // Try the specified port first
-    const server = app.listen(PORT, () => {
-        console.log(`Server running on http://localhost:${PORT}`);
-    }).on('error', (err) => {
-        if (err.code === 'EADDRINUSE') {
-            // If port is in use, try another port
-            const newPort = PORT + 1;
-            console.log(`Port ${PORT} is busy, trying port ${newPort}...`);
+    // Find an available port
+    const findAvailablePort = (port) => {
+        return new Promise((resolve, reject) => {
+            const server = require('http').createServer();
 
-            // Try the new port
-            app.listen(newPort, () => {
-                console.log(`Server running on http://localhost:${newPort}`);
+            server.on('error', (err) => {
+                if (err.code === 'EADDRINUSE') {
+                    // Port is in use, try the next one
+                    console.log(`Port ${port} is busy, trying port ${port + 1}...`);
+                    resolve(findAvailablePort(port + 1));
+                } else {
+                    reject(err);
+                }
             });
-        } else {
-            console.error('Error starting server:', err);
-        }
-    });
+
+            server.on('listening', () => {
+                // Port is available, close the server and return the port
+                server.close();
+                resolve(port);
+            });
+
+            server.listen(port);
+        });
+    };
+
+    // Find an available port starting from PORT and then start the app
+    findAvailablePort(PORT)
+        .then((availablePort) => {
+            app.listen(availablePort, () => {
+                console.log(`Server running on http://localhost:${availablePort}`);
+            });
+        })
+        .catch((err) => {
+            console.error('Error finding available port:', err);
+        });
 };
 
 // Only start the server if not in a serverless environment (like Vercel)
