@@ -43,8 +43,13 @@ app.use(express.static('public'));
 
 // Create uploads directory if it doesn't exist
 const uploadsDir = path.join(process.cwd(), 'uploads');
-if (!fs.existsSync(uploadsDir)) {
-    fs.mkdirSync(uploadsDir, { recursive: true });
+try {
+    if (!fs.existsSync(uploadsDir)) {
+        fs.mkdirSync(uploadsDir, { recursive: true });
+    }
+} catch (error) {
+    console.warn('Warning: Could not create uploads directory. This is expected in serverless environments.', error);
+    // Continue execution - in serverless environments we'll handle files differently
 }
 
 // Configure multer for file uploads
@@ -309,10 +314,15 @@ app.get('/uploads/:filename', (req, res) => {
     const filename = req.params.filename;
     const filePath = path.join(process.cwd(), 'uploads', filename);
 
-    if (fs.existsSync(filePath)) {
-        res.sendFile(filePath);
-    } else {
-        res.status(404).json({ error: 'Image not found' });
+    try {
+        if (fs.existsSync(filePath)) {
+            res.sendFile(filePath);
+        } else {
+            res.status(404).json({ error: 'Image not found' });
+        }
+    } catch (error) {
+        console.error('Error serving image:', error);
+        res.status(500).json({ error: 'Error serving image' });
     }
 });
 
@@ -326,9 +336,14 @@ app.delete('/api/photos/:id', async (req, res) => {
 
         if (photo) {
             // Delete file from filesystem
-            const filePath = path.join(__dirname, 'uploads', photo.filename);
-            if (fs.existsSync(filePath)) {
-                fs.unlinkSync(filePath);
+            try {
+                const filePath = path.join(process.cwd(), 'uploads', photo.filename);
+                if (fs.existsSync(filePath)) {
+                    fs.unlinkSync(filePath);
+                }
+            } catch (fsError) {
+                console.warn('Warning: Could not delete file. This is expected in serverless environments.', fsError);
+                // Continue execution - in serverless environments file might not exist
             }
         }
 
@@ -342,10 +357,31 @@ app.delete('/api/photos/:id', async (req, res) => {
     }
 });
 
-// Start server
-app.listen(PORT, () => {
-    console.log(`Server running on http://localhost:${PORT}`);
-});
+// Start server with port fallback mechanism
+const startServer = () => {
+    // Try the specified port first
+    const server = app.listen(PORT, () => {
+        console.log(`Server running on http://localhost:${PORT}`);
+    }).on('error', (err) => {
+        if (err.code === 'EADDRINUSE') {
+            // If port is in use, try another port
+            const newPort = PORT + 1;
+            console.log(`Port ${PORT} is busy, trying port ${newPort}...`);
+
+            // Close the previous server attempt
+            server.close();
+
+            // Try the new port
+            app.listen(newPort, () => {
+                console.log(`Server running on http://localhost:${newPort}`);
+            });
+        } else {
+            console.error('Error starting server:', err);
+        }
+    });
+};
+
+startServer();
 
 // Graceful shutdown
 process.on('SIGINT', async () => {
