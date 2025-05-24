@@ -8,6 +8,7 @@ const { MongoClient, ObjectId } = require('mongodb');
 require('dotenv').config();
 const OpenAI = require('openai');
 const { put, del, list } = require('@vercel/blob');
+const AWS = require('aws-sdk');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -16,6 +17,15 @@ const PORT = process.env.PORT || 3000;
 const openai = new OpenAI({
     apiKey: process.env.OPENAI_API_KEY,
 });
+
+// Configure AWS S3
+const s3Config = {
+    accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
+    region: process.env.AWS_REGION || 'us-east-1'
+};
+const s3 = new AWS.S3(s3Config);
+const S3_BUCKET = process.env.S3_BUCKET_NAME;
 
 // MongoDB Connection
 const uri = process.env.MONGODB_URI;
@@ -226,16 +236,16 @@ app.post('/api/upload', upload.single('photo'), async (req, res) => {
         console.log('Generated photoId:', photoId);
 
         try {
-            // Upload file to Vercel Blob
-            const uploadResult = await uploadFileToBlob(req.file, fileKey);
-            console.log('Upload result:', uploadResult);
+            // Upload file to storage
+            const fileInfo = await uploadFile(req.file, filename);
+            console.log('File uploaded to:', fileInfo.storage);
 
             // Get the local path for AI processing
             let imagePath;
-            if (uploadResult.isLocal) {
+            if (fileInfo.isLocal) {
                 imagePath = path.join(process.cwd(), 'uploads', filename);
             } else {
-                // If using Vercel Blob, we still have the local file until it's deleted after upload
+                // If using storage, we still have the local file until it's deleted after upload
                 imagePath = req.file.path;
             }
 
@@ -256,9 +266,9 @@ app.post('/api/upload', upload.single('photo'), async (req, res) => {
                 const metadata = {
                     id: photoId,
                     originalName: req.file.originalname,
-                    filename: uploadResult.key,
-                    fileUrl: uploadResult.url,
-                    isLocalStorage: uploadResult.isLocal,
+                    filename: fileInfo.key,
+                    fileUrl: fileInfo.url,
+                    isLocalStorage: fileInfo.isLocal,
                     size: req.file.size,
                     mimetype: req.file.mimetype,
                     description: description,
@@ -274,9 +284,9 @@ app.post('/api/upload', upload.single('photo'), async (req, res) => {
                 try {
                     const result = await photosCollection.insertOne({
                         _id: photoId,
-                        filename: uploadResult.key,
-                        fileUrl: uploadResult.url,
-                        isLocalStorage: uploadResult.isLocal,
+                        filename: fileInfo.key,
+                        fileUrl: fileInfo.url,
+                        isLocalStorage: fileInfo.isLocal,
                         description: description,
                         metadata: metadata,
                         created_at: new Date()
@@ -300,8 +310,8 @@ app.post('/api/upload', upload.single('photo'), async (req, res) => {
                     id: photoId,
                     originalName: req.file.originalname,
                     filename: fileKey,
-                    fileUrl: uploadResult.url,
-                    isLocalStorage: uploadResult.isLocal,
+                    fileUrl: fileInfo.url,
+                    isLocalStorage: fileInfo.isLocal,
                     size: req.file.size,
                     mimetype: req.file.mimetype,
                     description: 'Image uploaded successfully',
@@ -316,8 +326,8 @@ app.post('/api/upload', upload.single('photo'), async (req, res) => {
                     const result = await photosCollection.insertOne({
                         _id: photoId,
                         filename: fileKey,
-                        fileUrl: uploadResult.url,
-                        isLocalStorage: uploadResult.isLocal,
+                        fileUrl: fileInfo.url,
+                        isLocalStorage: fileInfo.isLocal,
                         description: metadata.description,
                         metadata: metadata,
                         created_at: new Date()
@@ -417,28 +427,31 @@ app.delete('/api/photos/:id', async (req, res) => {
         const photo = await photosCollection.findOne({ _id: photoId });
 
         if (photo) {
-            // Delete file from storage (Vercel Blob or local)
+            // Delete file from storage
             try {
-                if (photo.isLocalStorage) {
-                    // Delete from local filesystem
-                    const filePath = path.join(process.cwd(), 'uploads', photo.filename);
-                    if (fs.existsSync(filePath)) {
-                        fs.unlinkSync(filePath);
-                    }
+                const fileInfo = {
+                    isLocal: photo.isLocalStorage,
+                    key: photo.filename,
+                    url: photo.fileUrl,
+                    storage: photo.metadata.storage || (photo.isLocalStorage ? 'local' : 'blob')
+                };
+
+                const result = await deleteFile(fileInfo);
+
+                if (result) {
+                    // Delete from database
+                    const deleteResult = await photosCollection.deleteOne({ _id: photoId });
+                    res.json({ success: true, deletedId: photoId });
                 } else {
-                    // Delete from Vercel Blob
-                    await deleteFileFromBlob(photo.fileUrl, photo.isLocalStorage);
+                    return res.status(500).json({ success: false, error: 'Error deleting file' });
                 }
-            } catch (fsError) {
-                console.warn('Warning: Could not delete file:', fsError);
-                // Continue execution - file might not exist
+            } catch (error) {
+                console.error('Error deleting file:', error);
+                return res.status(500).json({ success: false, error: 'Error deleting file' });
             }
+        } else {
+            return res.status(404).json({ success: false, error: 'Photo not found' });
         }
-
-        // Delete from database
-        const result = await photosCollection.deleteOne({ _id: photoId });
-
-        res.json({ success: true, deletedId: photoId });
     } catch (error) {
         console.error('Database error:', error);
         return res.status(500).json({ success: false, error: 'Database error' });
@@ -451,81 +464,158 @@ app.use(express.static(path.join(__dirname, 'public')));
 // Make uploads directory accessible
 app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
 
-// Function to upload file to Vercel Blob
-async function uploadFileToBlob(file, filename) {
+// Function to upload file to AWS S3
+async function uploadFileToS3(file, key) {
     try {
-        console.log('Starting file upload to Vercel Blob:', filename);
+        console.log('Starting file upload to S3:', key);
 
-        // If we're in development mode and don't have Blob token, fallback to local storage
-        if (!process.env.BLOB_READ_WRITE_TOKEN) {
-            console.log('Vercel Blob token not found, using local filesystem');
-            return {
-                isLocal: true,
-                key: file.filename,
-                url: `/uploads/${file.filename}`
-            };
+        if (!process.env.AWS_ACCESS_KEY_ID || !process.env.S3_BUCKET_NAME) {
+            console.log('S3 credentials not found, falling back to Vercel Blob or local storage');
+            return null; // Return null to indicate fallback should be used
         }
 
         // Read file data
         const fileData = fs.readFileSync(file.path);
-        const fileExtension = path.extname(file.originalname);
-        const blobName = `${filename}${fileExtension}`;
 
-        console.log(`Uploading ${blobName} to Vercel Blob with token length: ${process.env.BLOB_READ_WRITE_TOKEN.length}`);
+        // Upload to S3
+        const params = {
+            Bucket: S3_BUCKET,
+            Key: key,
+            Body: fileData,
+            ContentType: file.mimetype,
+            ACL: 'public-read' // Make file publicly accessible
+        };
 
-        // Upload to Vercel Blob
-        const blob = await put(blobName, fileData, {
-            access: 'public',
-            contentType: file.mimetype,
-            token: process.env.BLOB_READ_WRITE_TOKEN
-        });
-
-        console.log(`Upload successful: ${blob.url}`);
+        console.log(`Uploading to S3 bucket: ${S3_BUCKET}, key: ${key}`);
+        const data = await s3.upload(params).promise();
+        console.log('S3 upload successful:', data.Location);
 
         // Delete local file after successful upload
         try {
             fs.unlinkSync(file.path);
         } catch (unlinkError) {
-            console.warn('Could not delete local file after Blob upload:', unlinkError);
+            console.warn('Could not delete local file after S3 upload:', unlinkError);
         }
 
         return {
             isLocal: false,
-            key: blobName,
-            url: blob.url
+            key: key,
+            url: data.Location,
+            storage: 's3'
         };
     } catch (error) {
-        console.error('Error uploading to Vercel Blob:', error);
-        console.error('Error details:', JSON.stringify(error, Object.getOwnPropertyNames(error)));
+        console.error('Error uploading to S3:', error);
+        return null; // Return null to indicate fallback should be used
+    }
+}
 
-        // Fallback to local file if Blob upload fails
+// Function to upload file to storage (tries S3 first, then Vercel Blob, then local)
+async function uploadFile(file, filename) {
+    try {
+        console.log('Starting file upload process for:', filename);
+
+        // Try S3 first if configured
+        if (process.env.AWS_ACCESS_KEY_ID && process.env.S3_BUCKET_NAME) {
+            const fileExtension = path.extname(file.originalname);
+            const s3Key = `${filename}${fileExtension}`;
+            const s3Result = await uploadFileToS3(file, s3Key);
+
+            if (s3Result) {
+                console.log('Successfully uploaded to S3');
+                return s3Result;
+            }
+            console.log('S3 upload failed, trying Vercel Blob...');
+        }
+
+        // Try Vercel Blob if S3 fails or is not configured
+        if (process.env.BLOB_READ_WRITE_TOKEN) {
+            try {
+                const fileData = fs.readFileSync(file.path);
+                const fileExtension = path.extname(file.originalname);
+                const blobName = `${filename}${fileExtension}`;
+
+                console.log(`Uploading ${blobName} to Vercel Blob...`);
+                const blob = await put(blobName, fileData, {
+                    access: 'public',
+                    contentType: file.mimetype,
+                    token: process.env.BLOB_READ_WRITE_TOKEN
+                });
+
+                console.log(`Vercel Blob upload successful: ${blob.url}`);
+
+                // Delete local file after successful upload
+                try {
+                    fs.unlinkSync(file.path);
+                } catch (unlinkError) {
+                    console.warn('Could not delete local file after Blob upload:', unlinkError);
+                }
+
+                return {
+                    isLocal: false,
+                    key: blobName,
+                    url: blob.url,
+                    storage: 'blob'
+                };
+            } catch (blobError) {
+                console.error('Error uploading to Vercel Blob:', blobError);
+                console.log('Vercel Blob upload failed, falling back to local storage...');
+            }
+        }
+
+        // Fallback to local storage if both S3 and Blob fail or are not configured
+        console.log('Using local filesystem for storage');
         return {
             isLocal: true,
             key: file.filename,
             url: `/uploads/${file.filename}`,
+            storage: 'local'
+        };
+    } catch (error) {
+        console.error('Error in file upload process:', error);
+
+        // Ultimate fallback to local storage
+        return {
+            isLocal: true,
+            key: file.filename,
+            url: `/uploads/${file.filename}`,
+            storage: 'local',
             error: error.message
         };
     }
 }
 
-// Function to delete file from Vercel Blob
-async function deleteFileFromBlob(url, isLocal) {
+// Function to delete file from storage
+async function deleteFile(fileInfo) {
     try {
-        // If it's stored locally, delete from local filesystem
-        if (isLocal) {
-            const filename = url.split('/').pop();
+        // Check storage type and call appropriate delete method
+        if (fileInfo.isLocal) {
+            // Delete from local filesystem
+            const filename = fileInfo.key;
             const filePath = path.join(process.cwd(), 'uploads', filename);
             if (fs.existsSync(filePath)) {
                 fs.unlinkSync(filePath);
+                console.log('Deleted local file:', filename);
             }
+            return true;
+        } else if (fileInfo.storage === 's3') {
+            // Delete from S3
+            const params = {
+                Bucket: S3_BUCKET,
+                Key: fileInfo.key
+            };
+            await s3.deleteObject(params).promise();
+            console.log('Deleted S3 file:', fileInfo.key);
+            return true;
+        } else if (fileInfo.storage === 'blob') {
+            // Delete from Vercel Blob
+            await del(fileInfo.url);
+            console.log('Deleted Blob file:', fileInfo.url);
             return true;
         }
 
-        // Delete from Vercel Blob
-        await del(url);
-        return true;
+        return false;
     } catch (error) {
-        console.error('Error deleting file from Vercel Blob:', error);
+        console.error('Error deleting file:', error);
         return false;
     }
 }
