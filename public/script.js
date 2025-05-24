@@ -144,6 +144,12 @@ class PhotoApp {
         }
     }
 
+    getApiUrl(endpoint) {
+        // Get the base URL from the current window location
+        const baseUrl = window.location.origin;
+        return `${baseUrl}${endpoint}`;
+    }
+
     async savePhoto() {
         if (!this.currentPhotoBlob) return;
 
@@ -153,7 +159,7 @@ class PhotoApp {
             const formData = new FormData();
             formData.append('photo', this.currentPhotoBlob, 'photo.jpg');
 
-            const response = await fetch('/api/upload', {
+            const response = await fetch(this.getApiUrl('/api/upload'), {
                 method: 'POST',
                 body: formData
             });
@@ -199,7 +205,7 @@ class PhotoApp {
 
     async loadPhotos() {
         try {
-            const response = await fetch('/api/photos');
+            const response = await fetch(this.getApiUrl('/api/photos'));
             const photos = await response.json();
 
             this.displayPhotos(photos);
@@ -269,7 +275,7 @@ class PhotoApp {
         }
 
         card.innerHTML = `
-            <img src="/uploads/${photo.filename}" alt="${photo.description}" loading="lazy">
+            <img src="${this.getApiUrl('/uploads/')}${photo.filename}" alt="${photo.description}" loading="lazy">
             <div class="photo-info">
                 <h3>📷 Photo Analysis</h3>
                 ${objectsPreview}
@@ -282,7 +288,7 @@ class PhotoApp {
 
     openPhotoModal(photo) {
         this.currentPhotoId = photo.id;
-        this.modalImage.src = `/uploads/${photo.filename}`;
+        this.modalImage.src = `${this.getApiUrl('/uploads/')}${photo.filename}`;
 
         // Create a better display for detected objects
         if (photo.metadata.detectedObjects && photo.metadata.detectedObjects.length > 0) {
@@ -336,7 +342,7 @@ class PhotoApp {
         }
 
         try {
-            const response = await fetch(`/api/photos/${this.currentPhotoId}`, {
+            const response = await fetch(this.getApiUrl(`/api/photos/${this.currentPhotoId}`), {
                 method: 'DELETE'
             });
 

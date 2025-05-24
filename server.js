@@ -354,11 +354,12 @@ app.get('/uploads/:filename', (req, res) => {
         if (fs.existsSync(filePath)) {
             res.sendFile(filePath);
         } else {
-            res.status(404).json({ error: 'Image not found' });
+            console.error(`File not found: ${filePath}`);
+            res.status(404).json({ success: false, error: 'Image not found' });
         }
     } catch (error) {
         console.error('Error serving image:', error);
-        res.status(500).json({ error: 'Error serving image' });
+        res.status(500).json({ success: false, error: 'Error serving image' });
     }
 });
 
@@ -392,6 +393,12 @@ app.delete('/api/photos/:id', async (req, res) => {
         return res.status(500).json({ error: 'Database error' });
     }
 });
+
+// Serve static files from public directory
+app.use(express.static(path.join(__dirname, 'public')));
+
+// Make uploads directory accessible
+app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
 
 // Start server with port fallback mechanism
 const startServer = () => {
