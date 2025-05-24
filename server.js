@@ -38,13 +38,24 @@ async function connectToMongoDB() {
         console.log('Connected to MongoDB');
         db = client.db('photo-description-app');
         photosCollection = db.collection('photos');
+        return photosCollection;
     } catch (error) {
         console.error('Error connecting to MongoDB:', error);
+        throw error;
     }
 }
 
+// Ensure the database is connected
+async function ensureDbConnected() {
+    if (!photosCollection) {
+        console.log('Database not connected yet, connecting now...');
+        return await connectToMongoDB();
+    }
+    return photosCollection;
+}
+
 // Connect to MongoDB when the server starts
-connectToMongoDB();
+connectToMongoDB().catch(console.error);
 
 // Middleware
 app.use(cors());
@@ -279,9 +290,12 @@ app.post('/api/upload', upload.single('photo'), async (req, res) => {
 
                 console.log('Saving to MongoDB...');
 
+                // Ensure DB connection is established
+                const collection = await ensureDbConnected();
+
                 // Store in MongoDB
                 try {
-                    const result = await photosCollection.insertOne({
+                    const result = await collection.insertOne({
                         _id: photoId,
                         filename: fileInfo.key,
                         fileUrl: fileInfo.url,
@@ -322,7 +336,10 @@ app.post('/api/upload', upload.single('photo'), async (req, res) => {
                 };
 
                 try {
-                    const result = await photosCollection.insertOne({
+                    // Ensure DB connection is established
+                    const collection = await ensureDbConnected();
+
+                    const result = await collection.insertOne({
                         _id: photoId,
                         filename: fileKey,
                         fileUrl: fileInfo.url,
@@ -338,7 +355,7 @@ app.post('/api/upload', upload.single('photo'), async (req, res) => {
                     });
                 } catch (dbError) {
                     console.error('Database error:', dbError);
-                    return res.status(500).json({ success: false, error: 'Database error' });
+                    return res.status(500).json({ success: false, error: 'Database error: ' + dbError.message });
                 }
             }
         } catch (error) {
@@ -354,7 +371,10 @@ app.post('/api/upload', upload.single('photo'), async (req, res) => {
 // Get all photos
 app.get('/api/photos', async (req, res) => {
     try {
-        const photos = await photosCollection.find({})
+        // Ensure DB connection is established
+        const collection = await ensureDbConnected();
+
+        const photos = await collection.find({})
             .sort({ created_at: -1 })
             .toArray();
 
@@ -369,7 +389,7 @@ app.get('/api/photos', async (req, res) => {
         })));
     } catch (error) {
         console.error('Database error:', error);
-        return res.status(500).json({ success: false, error: 'Database error' });
+        return res.status(500).json({ success: false, error: 'Database error: ' + error.message });
     }
 });
 
@@ -378,7 +398,10 @@ app.get('/api/photos/:id', async (req, res) => {
     const photoId = req.params.id;
 
     try {
-        const photo = await photosCollection.findOne({ _id: photoId });
+        // Ensure DB connection is established
+        const collection = await ensureDbConnected();
+
+        const photo = await collection.findOne({ _id: photoId });
 
         if (!photo) {
             return res.status(404).json({ success: false, error: 'Photo not found' });
@@ -395,7 +418,7 @@ app.get('/api/photos/:id', async (req, res) => {
         });
     } catch (error) {
         console.error('Database error:', error);
-        return res.status(500).json({ success: false, error: 'Database error' });
+        return res.status(500).json({ success: false, error: 'Database error: ' + error.message });
     }
 });
 
@@ -422,8 +445,11 @@ app.delete('/api/photos/:id', async (req, res) => {
     const photoId = req.params.id;
 
     try {
+        // Ensure DB connection is established
+        const collection = await ensureDbConnected();
+
         // First get the photo to delete the file
-        const photo = await photosCollection.findOne({ _id: photoId });
+        const photo = await collection.findOne({ _id: photoId });
 
         if (photo) {
             // Delete file from storage
@@ -439,7 +465,7 @@ app.delete('/api/photos/:id', async (req, res) => {
 
                 if (result) {
                     // Delete from database
-                    const deleteResult = await photosCollection.deleteOne({ _id: photoId });
+                    const deleteResult = await collection.deleteOne({ _id: photoId });
                     res.json({ success: true, deletedId: photoId });
                 } else {
                     return res.status(500).json({ success: false, error: 'Error deleting file' });
@@ -453,7 +479,7 @@ app.delete('/api/photos/:id', async (req, res) => {
         }
     } catch (error) {
         console.error('Database error:', error);
-        return res.status(500).json({ success: false, error: 'Database error' });
+        return res.status(500).json({ success: false, error: 'Database error: ' + error.message });
     }
 });
 
