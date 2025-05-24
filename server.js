@@ -7,7 +7,6 @@ const { v4: uuidv4 } = require('uuid');
 const { MongoClient, ObjectId } = require('mongodb');
 require('dotenv').config();
 const OpenAI = require('openai');
-const { put, del, list } = require('@vercel/blob');
 const AWS = require('aws-sdk');
 
 const app = express();
@@ -470,7 +469,7 @@ async function uploadFileToS3(file, key) {
         console.log('Starting file upload to S3:', key);
 
         if (!process.env.AWS_ACCESS_KEY_ID || !process.env.S3_BUCKET_NAME) {
-            console.log('S3 credentials not found, falling back to Vercel Blob or local storage');
+            console.log('S3 credentials not found, falling back to local storage');
             return null; // Return null to indicate fallback should be used
         }
 
@@ -509,7 +508,7 @@ async function uploadFileToS3(file, key) {
     }
 }
 
-// Function to upload file to storage (tries S3 first, then Vercel Blob, then local)
+// Function to upload file to storage (tries S3 first, then local)
 async function uploadFile(file, filename) {
     try {
         console.log('Starting file upload process for:', filename);
@@ -524,45 +523,10 @@ async function uploadFile(file, filename) {
                 console.log('Successfully uploaded to S3');
                 return s3Result;
             }
-            console.log('S3 upload failed, trying Vercel Blob...');
+            console.log('S3 upload failed, falling back to local storage...');
         }
 
-        // Try Vercel Blob if S3 fails or is not configured
-        if (process.env.BLOB_READ_WRITE_TOKEN) {
-            try {
-                const fileData = fs.readFileSync(file.path);
-                const fileExtension = path.extname(file.originalname);
-                const blobName = `${filename}${fileExtension}`;
-
-                console.log(`Uploading ${blobName} to Vercel Blob...`);
-                const blob = await put(blobName, fileData, {
-                    access: 'public',
-                    contentType: file.mimetype,
-                    token: process.env.BLOB_READ_WRITE_TOKEN
-                });
-
-                console.log(`Vercel Blob upload successful: ${blob.url}`);
-
-                // Delete local file after successful upload
-                try {
-                    fs.unlinkSync(file.path);
-                } catch (unlinkError) {
-                    console.warn('Could not delete local file after Blob upload:', unlinkError);
-                }
-
-                return {
-                    isLocal: false,
-                    key: blobName,
-                    url: blob.url,
-                    storage: 'blob'
-                };
-            } catch (blobError) {
-                console.error('Error uploading to Vercel Blob:', blobError);
-                console.log('Vercel Blob upload failed, falling back to local storage...');
-            }
-        }
-
-        // Fallback to local storage if both S3 and Blob fail or are not configured
+        // Fallback to local storage if S3 fails or is not configured
         console.log('Using local filesystem for storage');
         return {
             isLocal: true,
@@ -605,11 +569,6 @@ async function deleteFile(fileInfo) {
             };
             await s3.deleteObject(params).promise();
             console.log('Deleted S3 file:', fileInfo.key);
-            return true;
-        } else if (fileInfo.storage === 'blob') {
-            // Delete from Vercel Blob
-            await del(fileInfo.url);
-            console.log('Deleted Blob file:', fileInfo.url);
             return true;
         }
 
