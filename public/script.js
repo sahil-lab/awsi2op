@@ -158,7 +158,24 @@ class PhotoApp {
                 body: formData
             });
 
-            const result = await response.json();
+            // Check if response is ok
+            if (!response.ok) {
+                const errorText = await response.text();
+                console.error('Server error response:', errorText);
+                throw new Error(`Server error: ${response.status} ${response.statusText}`);
+            }
+
+            // Get the response text first
+            const responseText = await response.text();
+
+            // Try to parse as JSON
+            let result;
+            try {
+                result = JSON.parse(responseText);
+            } catch (parseError) {
+                console.error('Failed to parse server response as JSON:', responseText);
+                throw new Error('Invalid server response format');
+            }
 
             if (result.success) {
                 this.showNotification('Photo saved successfully!', 'success');

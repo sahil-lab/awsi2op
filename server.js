@@ -96,7 +96,19 @@ async function detectObjectsInImage(imagePath) {
             max_tokens: 1500
         });
 
+        // Ensure we got a valid response
+        if (!response || !response.choices || !response.choices[0] || !response.choices[0].message) {
+            console.error('Invalid OpenAI response structure:', response);
+            return getFallbackObjects();
+        }
+
         const content = response.choices[0].message.content;
+
+        // Make sure content is not empty
+        if (!content || typeof content !== 'string') {
+            console.error('Empty or invalid content in OpenAI response');
+            return getFallbackObjects();
+        }
 
         // Clean the response and try to parse JSON
         let cleanContent = content.trim();
@@ -111,10 +123,24 @@ async function detectObjectsInImage(imagePath) {
         try {
             const objects = JSON.parse(cleanContent);
             console.log("Detected objects:", JSON.stringify(objects, null, 2));
-            return Array.isArray(objects) ? objects : [];
+
+            // Validate that objects is an array
+            if (!Array.isArray(objects)) {
+                console.error('OpenAI response is not an array:', objects);
+                return getFallbackObjects();
+            }
+
+            // Validate each object has required properties
+            const validObjects = objects.filter(obj =>
+                obj && typeof obj === 'object' &&
+                obj.name && typeof obj.name === 'string' &&
+                typeof obj.confidence === 'number'
+            );
+
+            return validObjects;
         } catch (parseError) {
             console.error('Error parsing OpenAI response:', parseError);
-            console.log('Raw response:', content);
+            console.log('Raw response content:', content);
             // Fallback: extract object names from text response
             return extractObjectsFromText(content);
         }
@@ -182,86 +208,96 @@ app.get('/', (req, res) => {
 
 // Upload and process photo
 app.post('/api/upload', upload.single('photo'), async (req, res) => {
-    if (!req.file) {
-        return res.status(400).json({ error: 'No file uploaded' });
-    }
-
-    const photoId = uuidv4();
-    const filename = req.file.filename;
-    const imagePath = path.join(process.cwd(), 'uploads', filename);
-
     try {
-        // Use AI to detect objects in the image
-        const detectedObjects = await detectObjectsInImage(imagePath);
+        if (!req.file) {
+            return res.status(400).json({ success: false, error: 'No file uploaded' });
+        }
 
-        // Create a description from detected objects
-        const objectNames = detectedObjects.map(obj => obj.name).join(', ');
-        const description = detectedObjects.length > 0
-            ? `Objects detected: ${objectNames}`
-            : 'No specific objects detected';
-
-        // Create metadata with detected objects
-        const metadata = {
-            id: photoId,
-            originalName: req.file.originalname,
-            filename: filename,
-            size: req.file.size,
-            mimetype: req.file.mimetype,
-            description: description,
-            detectedObjects: detectedObjects,
-            objectCategories: [...new Set(detectedObjects.map(obj => obj.category || 'Uncategorized'))],
-            analysisTimestamp: new Date().toISOString(),
-            uploadedAt: new Date().toISOString()
-        };
-
-        // Store in MongoDB
-        const result = await photosCollection.insertOne({
-            _id: photoId,
-            filename: filename,
-            description: description,
-            metadata: metadata,
-            created_at: new Date()
-        });
-
-        res.json({
-            success: true,
-            data: metadata
-        });
-    } catch (error) {
-        console.error('Error processing image:', error);
-
-        // Fallback to basic metadata if AI processing fails
-        const metadata = {
-            id: photoId,
-            originalName: req.file.originalname,
-            filename: filename,
-            size: req.file.size,
-            mimetype: req.file.mimetype,
-            description: 'Image uploaded successfully',
-            detectedObjects: [],
-            objectCategories: [],
-            analysisTimestamp: null,
-            uploadedAt: new Date().toISOString(),
-            error: 'Object detection failed'
-        };
+        const photoId = uuidv4();
+        const filename = req.file.filename;
+        const imagePath = path.join(process.cwd(), 'uploads', filename);
 
         try {
-            const result = await photosCollection.insertOne({
-                _id: photoId,
-                filename: filename,
-                description: metadata.description,
-                metadata: metadata,
-                created_at: new Date()
-            });
+            // Use AI to detect objects in the image
+            const detectedObjects = await detectObjectsInImage(imagePath);
 
-            res.json({
-                success: true,
-                data: metadata
-            });
-        } catch (dbError) {
-            console.error('Database error:', dbError);
-            return res.status(500).json({ error: 'Database error' });
+            // Create a description from detected objects
+            const objectNames = detectedObjects.map(obj => obj.name).join(', ');
+            const description = detectedObjects.length > 0
+                ? `Objects detected: ${objectNames}`
+                : 'No specific objects detected';
+
+            // Create metadata with detected objects
+            const metadata = {
+                id: photoId,
+                originalName: req.file.originalname,
+                filename: filename,
+                size: req.file.size,
+                mimetype: req.file.mimetype,
+                description: description,
+                detectedObjects: detectedObjects,
+                objectCategories: [...new Set(detectedObjects.map(obj => obj.category || 'Uncategorized'))],
+                analysisTimestamp: new Date().toISOString(),
+                uploadedAt: new Date().toISOString()
+            };
+
+            // Store in MongoDB
+            try {
+                const result = await photosCollection.insertOne({
+                    _id: photoId,
+                    filename: filename,
+                    description: description,
+                    metadata: metadata,
+                    created_at: new Date()
+                });
+
+                return res.json({
+                    success: true,
+                    data: metadata
+                });
+            } catch (dbError) {
+                console.error('Database error:', dbError);
+                return res.status(500).json({ success: false, error: 'Database error' });
+            }
+        } catch (aiError) {
+            console.error('Error processing image with AI:', aiError);
+
+            // Fallback to basic metadata if AI processing fails
+            const metadata = {
+                id: photoId,
+                originalName: req.file.originalname,
+                filename: filename,
+                size: req.file.size,
+                mimetype: req.file.mimetype,
+                description: 'Image uploaded successfully',
+                detectedObjects: [],
+                objectCategories: [],
+                analysisTimestamp: null,
+                uploadedAt: new Date().toISOString(),
+                error: 'Object detection failed'
+            };
+
+            try {
+                const result = await photosCollection.insertOne({
+                    _id: photoId,
+                    filename: filename,
+                    description: metadata.description,
+                    metadata: metadata,
+                    created_at: new Date()
+                });
+
+                return res.json({
+                    success: true,
+                    data: metadata
+                });
+            } catch (dbError) {
+                console.error('Database error:', dbError);
+                return res.status(500).json({ success: false, error: 'Database error' });
+            }
         }
+    } catch (error) {
+        console.error('Unexpected error in upload endpoint:', error);
+        return res.status(500).json({ success: false, error: 'Server error: ' + (error.message || 'Unknown error') });
     }
 });
 
