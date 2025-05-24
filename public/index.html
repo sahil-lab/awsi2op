@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Photo Description App</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>📸 Photo Description App</h1>
+            <p>Take photos, get AI descriptions, and store them in your collection</p>
+        </header>
+
+        <main>
+            <!-- Camera Section -->
+            <section class="camera-section">
+                <div class="camera-container">
+                    <video id="video" autoplay playsinline></video>
+                    <canvas id="canvas" style="display: none;"></canvas>
+                    <div class="camera-overlay">
+                        <button id="captureBtn" class="capture-btn">📷 Capture Photo</button>
+                    </div>
+                </div>
+                
+                <div class="camera-controls">
+                    <button id="startCameraBtn" class="btn btn-primary">Start Camera</button>
+                    <button id="stopCameraBtn" class="btn btn-secondary" style="display: none;">Stop Camera</button>
+                    <input type="file" id="fileInput" accept="image/*" style="display: none;">
+                    <button id="uploadBtn" class="btn btn-outline">Upload from Device</button>
+                </div>
+
+                <!-- Preview Section -->
+                <div id="previewSection" class="preview-section" style="display: none;">
+                    <h3>Preview</h3>
+                    <img id="previewImage" alt="Preview">
+                    <div class="preview-actions">
+                        <button id="savePhotoBtn" class="btn btn-success">Save Photo</button>
+                        <button id="retakeBtn" class="btn btn-secondary">Retake</button>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Loading Section -->
+            <div id="loadingSection" class="loading-section" style="display: none;">
+                <div class="spinner"></div>
+                <p>Processing your photo...</p>
+            </div>
+
+            <!-- Photos List Section -->
+            <section class="photos-section">
+                <div class="section-header">
+                    <h2>📋 Your Photo Collection</h2>
+                    <button id="refreshBtn" class="btn btn-outline">🔄 Refresh</button>
+                </div>
+                
+                <div id="photosList" class="photos-list">
+                    <!-- Photos will be loaded here -->
+                </div>
+                
+                <div id="emptyState" class="empty-state">
+                    <p>No photos yet. Take your first photo to get started!</p>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <!-- Photo Modal -->
+    <div id="photoModal" class="modal" style="display: none;">
+        <div class="modal-content">
+            <span class="close">&times;</span>
+            <img id="modalImage" alt="Full size photo">
+            <div class="modal-info">
+                <h3 id="modalDescription"></h3>
+                <div id="modalMetadata"></div>
+                <button id="deletePhotoBtn" class="btn btn-danger">🗑️ Delete Photo</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+</html>
