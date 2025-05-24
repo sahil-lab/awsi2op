@@ -556,3 +556,6 @@ process.on('SIGINT', async () => {
         process.exit(1);
     }
 });
+
+// For Vercel serverless deployment
+module.exports = app;
