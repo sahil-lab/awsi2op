@@ -368,9 +368,6 @@ const startServer = () => {
             const newPort = PORT + 1;
             console.log(`Port ${PORT} is busy, trying port ${newPort}...`);
 
-            // Close the previous server attempt
-            server.close();
-
             // Try the new port
             app.listen(newPort, () => {
                 console.log(`Server running on http://localhost:${newPort}`);
@@ -381,7 +378,10 @@ const startServer = () => {
     });
 };
 
-startServer();
+// Only start the server if not in a serverless environment (like Vercel)
+if (process.env.NODE_ENV !== 'production' || !process.env.VERCEL) {
+    startServer();
+}
 
 // Graceful shutdown
 process.on('SIGINT', async () => {
