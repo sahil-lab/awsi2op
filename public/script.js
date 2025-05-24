@@ -274,8 +274,11 @@ class PhotoApp {
             `;
         }
 
+        // Use fileUrl if available (S3), otherwise construct local path
+        const imageUrl = photo.fileUrl || `${this.getApiUrl('/uploads/')}${photo.filename}`;
+
         card.innerHTML = `
-            <img src="${this.getApiUrl('/uploads/')}${photo.filename}" alt="${photo.description}" loading="lazy">
+            <img src="${imageUrl}" alt="${photo.description}" loading="lazy">
             <div class="photo-info">
                 <h3>📷 Photo Analysis</h3>
                 ${objectsPreview}
@@ -288,7 +291,10 @@ class PhotoApp {
 
     openPhotoModal(photo) {
         this.currentPhotoId = photo.id;
-        this.modalImage.src = `${this.getApiUrl('/uploads/')}${photo.filename}`;
+
+        // Use fileUrl if available (S3), otherwise construct local path
+        const imageUrl = photo.fileUrl || `${this.getApiUrl('/uploads/')}${photo.filename}`;
+        this.modalImage.src = imageUrl;
 
         // Create a better display for detected objects
         if (photo.metadata.detectedObjects && photo.metadata.detectedObjects.length > 0) {

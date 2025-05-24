@@ -7,6 +7,7 @@ const { v4: uuidv4 } = require('uuid');
 const { MongoClient, ObjectId } = require('mongodb');
 require('dotenv').config();
 const OpenAI = require('openai');
+const AWS = require('aws-sdk');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -15,6 +16,17 @@ const PORT = process.env.PORT || 3000;
 const openai = new OpenAI({
     apiKey: process.env.OPENAI_API_KEY,
 });
+
+// Configure AWS
+AWS.config.update({
+    accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
+    region: process.env.AWS_REGION || 'us-east-1'
+});
+
+// Initialize S3 instance
+const s3 = new AWS.S3();
+const S3_BUCKET = process.env.S3_BUCKET_NAME;
 
 // MongoDB Connection
 const uri = process.env.MONGODB_URI;
@@ -215,7 +227,15 @@ app.post('/api/upload', upload.single('photo'), async (req, res) => {
 
         const photoId = uuidv4();
         const filename = req.file.filename;
-        const imagePath = path.join(process.cwd(), 'uploads', filename);
+        const fileKey = `photos/${photoId}-${filename}`;
+
+        // Upload file to S3
+        const uploadResult = await uploadFileToS3(req.file, fileKey);
+
+        // Get the local path or S3 URL for AI processing
+        const imagePath = uploadResult.isLocal
+            ? path.join(process.cwd(), 'uploads', filename)
+            : req.file.path; // Use the local temp path before it's deleted
 
         try {
             // Use AI to detect objects in the image
@@ -231,7 +251,9 @@ app.post('/api/upload', upload.single('photo'), async (req, res) => {
             const metadata = {
                 id: photoId,
                 originalName: req.file.originalname,
-                filename: filename,
+                filename: uploadResult.key,
+                fileUrl: uploadResult.url,
+                isLocalStorage: uploadResult.isLocal,
                 size: req.file.size,
                 mimetype: req.file.mimetype,
                 description: description,
@@ -245,7 +267,9 @@ app.post('/api/upload', upload.single('photo'), async (req, res) => {
             try {
                 const result = await photosCollection.insertOne({
                     _id: photoId,
-                    filename: filename,
+                    filename: uploadResult.key,
+                    fileUrl: uploadResult.url,
+                    isLocalStorage: uploadResult.isLocal,
                     description: description,
                     metadata: metadata,
                     created_at: new Date()
@@ -266,7 +290,9 @@ app.post('/api/upload', upload.single('photo'), async (req, res) => {
             const metadata = {
                 id: photoId,
                 originalName: req.file.originalname,
-                filename: filename,
+                filename: uploadResult.key,
+                fileUrl: uploadResult.url,
+                isLocalStorage: uploadResult.isLocal,
                 size: req.file.size,
                 mimetype: req.file.mimetype,
                 description: 'Image uploaded successfully',
@@ -280,7 +306,9 @@ app.post('/api/upload', upload.single('photo'), async (req, res) => {
             try {
                 const result = await photosCollection.insertOne({
                     _id: photoId,
-                    filename: filename,
+                    filename: uploadResult.key,
+                    fileUrl: uploadResult.url,
+                    isLocalStorage: uploadResult.isLocal,
                     description: metadata.description,
                     metadata: metadata,
                     created_at: new Date()
@@ -311,13 +339,15 @@ app.get('/api/photos', async (req, res) => {
         res.json(photos.map(photo => ({
             id: photo._id,
             filename: photo.filename,
+            fileUrl: photo.fileUrl || `/uploads/${photo.filename}`,
+            isLocalStorage: photo.isLocalStorage || true,
             description: photo.description,
             metadata: photo.metadata,
             created_at: photo.created_at
         })));
     } catch (error) {
         console.error('Database error:', error);
-        return res.status(500).json({ error: 'Database error' });
+        return res.status(500).json({ success: false, error: 'Database error' });
     }
 });
 
@@ -329,19 +359,21 @@ app.get('/api/photos/:id', async (req, res) => {
         const photo = await photosCollection.findOne({ _id: photoId });
 
         if (!photo) {
-            return res.status(404).json({ error: 'Photo not found' });
+            return res.status(404).json({ success: false, error: 'Photo not found' });
         }
 
         res.json({
             id: photo._id,
             filename: photo.filename,
+            fileUrl: photo.fileUrl || `/uploads/${photo.filename}`,
+            isLocalStorage: photo.isLocalStorage || true,
             description: photo.description,
             metadata: photo.metadata,
             created_at: photo.created_at
         });
     } catch (error) {
         console.error('Database error:', error);
-        return res.status(500).json({ error: 'Database error' });
+        return res.status(500).json({ success: false, error: 'Database error' });
     }
 });
 
@@ -372,15 +404,21 @@ app.delete('/api/photos/:id', async (req, res) => {
         const photo = await photosCollection.findOne({ _id: photoId });
 
         if (photo) {
-            // Delete file from filesystem
+            // Delete file from storage (S3 or local)
             try {
-                const filePath = path.join(process.cwd(), 'uploads', photo.filename);
-                if (fs.existsSync(filePath)) {
-                    fs.unlinkSync(filePath);
+                if (photo.isLocalStorage) {
+                    // Delete from local filesystem
+                    const filePath = path.join(process.cwd(), 'uploads', photo.filename);
+                    if (fs.existsSync(filePath)) {
+                        fs.unlinkSync(filePath);
+                    }
+                } else {
+                    // Delete from S3
+                    await deleteFileFromS3(photo.filename, photo.isLocalStorage);
                 }
             } catch (fsError) {
-                console.warn('Warning: Could not delete file. This is expected in serverless environments.', fsError);
-                // Continue execution - in serverless environments file might not exist
+                console.warn('Warning: Could not delete file:', fsError);
+                // Continue execution - file might not exist
             }
         }
 
@@ -390,7 +428,7 @@ app.delete('/api/photos/:id', async (req, res) => {
         res.json({ success: true, deletedId: photoId });
     } catch (error) {
         console.error('Database error:', error);
-        return res.status(500).json({ error: 'Database error' });
+        return res.status(500).json({ success: false, error: 'Database error' });
     }
 });
 
@@ -399,6 +437,82 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 // Make uploads directory accessible
 app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
+
+// Function to upload file to S3
+async function uploadFileToS3(file, key) {
+    try {
+        // If we're in development mode and don't have S3 credentials, fallback to local storage
+        if (process.env.NODE_ENV !== 'production' &&
+            (!process.env.AWS_ACCESS_KEY_ID || !process.env.S3_BUCKET_NAME)) {
+            console.log('S3 credentials not found, using local filesystem in development mode');
+            return {
+                isLocal: true,
+                key: file.filename,
+                url: `/uploads/${file.filename}`
+            };
+        }
+
+        // Prepare upload parameters
+        const params = {
+            Bucket: S3_BUCKET,
+            Key: key,
+            Body: fs.createReadStream(file.path),
+            ContentType: file.mimetype,
+            ACL: 'public-read' // Make file publicly accessible
+        };
+
+        // Upload to S3
+        const data = await s3.upload(params).promise();
+
+        // Delete local file after successful upload
+        try {
+            fs.unlinkSync(file.path);
+        } catch (unlinkError) {
+            console.warn('Could not delete local file after S3 upload:', unlinkError);
+        }
+
+        return {
+            isLocal: false,
+            key: key,
+            url: data.Location
+        };
+    } catch (error) {
+        console.error('Error uploading to S3:', error);
+        // Fallback to local file if S3 upload fails
+        return {
+            isLocal: true,
+            key: file.filename,
+            url: `/uploads/${file.filename}`,
+            error: error.message
+        };
+    }
+}
+
+// Function to delete file from S3
+async function deleteFileFromS3(key, isLocal) {
+    try {
+        // If it's stored locally, delete from local filesystem
+        if (isLocal) {
+            const filePath = path.join(process.cwd(), 'uploads', key);
+            if (fs.existsSync(filePath)) {
+                fs.unlinkSync(filePath);
+            }
+            return true;
+        }
+
+        // Delete from S3
+        const params = {
+            Bucket: S3_BUCKET,
+            Key: key
+        };
+
+        await s3.deleteObject(params).promise();
+        return true;
+    } catch (error) {
+        console.error('Error deleting file from S3:', error);
+        return false;
+    }
+}
 
 // Start server with port fallback mechanism
 const startServer = () => {
