@@ -210,107 +210,131 @@ app.get('/', (req, res) => {
 // Upload and process photo
 app.post('/api/upload', upload.single('photo'), async (req, res) => {
     try {
+        console.log('Upload endpoint called');
+
         if (!req.file) {
+            console.log('No file uploaded');
             return res.status(400).json({ success: false, error: 'No file uploaded' });
         }
+
+        console.log('File received:', req.file.originalname, req.file.mimetype, req.file.size);
 
         const photoId = uuidv4();
         const filename = req.file.filename;
         const fileKey = `photos/${photoId}`;
 
-        // Upload file to Vercel Blob
-        const uploadResult = await uploadFileToBlob(req.file, fileKey);
-
-        // Get the local path or Vercel Blob URL for AI processing
-        const imagePath = uploadResult.isLocal
-            ? path.join(process.cwd(), 'uploads', filename)
-            : req.file.path; // Use the local temp path before it's deleted
+        console.log('Generated photoId:', photoId);
 
         try {
-            // Use AI to detect objects in the image
-            const detectedObjects = await detectObjectsInImage(imagePath);
+            // Upload file to Vercel Blob
+            const uploadResult = await uploadFileToBlob(req.file, fileKey);
+            console.log('Upload result:', uploadResult);
 
-            // Create a description from detected objects
-            const objectNames = detectedObjects.map(obj => obj.name).join(', ');
-            const description = detectedObjects.length > 0
-                ? `Objects detected: ${objectNames}`
-                : 'No specific objects detected';
+            // Get the local path for AI processing
+            let imagePath;
+            if (uploadResult.isLocal) {
+                imagePath = path.join(process.cwd(), 'uploads', filename);
+            } else {
+                // If using Vercel Blob, we still have the local file until it's deleted after upload
+                imagePath = req.file.path;
+            }
 
-            // Create metadata with detected objects
-            const metadata = {
-                id: photoId,
-                originalName: req.file.originalname,
-                filename: uploadResult.key,
-                fileUrl: uploadResult.url,
-                isLocalStorage: uploadResult.isLocal,
-                size: req.file.size,
-                mimetype: req.file.mimetype,
-                description: description,
-                detectedObjects: detectedObjects,
-                objectCategories: [...new Set(detectedObjects.map(obj => obj.category || 'Uncategorized'))],
-                analysisTimestamp: new Date().toISOString(),
-                uploadedAt: new Date().toISOString()
-            };
+            console.log('Using image path for AI:', imagePath);
 
-            // Store in MongoDB
             try {
-                const result = await photosCollection.insertOne({
-                    _id: photoId,
+                // Use AI to detect objects in the image
+                const detectedObjects = await detectObjectsInImage(imagePath);
+                console.log('AI detection complete, objects found:', detectedObjects.length);
+
+                // Create a description from detected objects
+                const objectNames = detectedObjects.map(obj => obj.name).join(', ');
+                const description = detectedObjects.length > 0
+                    ? `Objects detected: ${objectNames}`
+                    : 'No specific objects detected';
+
+                // Create metadata with detected objects
+                const metadata = {
+                    id: photoId,
+                    originalName: req.file.originalname,
                     filename: uploadResult.key,
                     fileUrl: uploadResult.url,
                     isLocalStorage: uploadResult.isLocal,
+                    size: req.file.size,
+                    mimetype: req.file.mimetype,
                     description: description,
-                    metadata: metadata,
-                    created_at: new Date()
-                });
+                    detectedObjects: detectedObjects,
+                    objectCategories: [...new Set(detectedObjects.map(obj => obj.category || 'Uncategorized'))],
+                    analysisTimestamp: new Date().toISOString(),
+                    uploadedAt: new Date().toISOString()
+                };
 
-                return res.json({
-                    success: true,
-                    data: metadata
-                });
-            } catch (dbError) {
-                console.error('Database error:', dbError);
-                return res.status(500).json({ success: false, error: 'Database error' });
-            }
-        } catch (aiError) {
-            console.error('Error processing image with AI:', aiError);
+                console.log('Saving to MongoDB...');
 
-            // Fallback to basic metadata if AI processing fails
-            const metadata = {
-                id: photoId,
-                originalName: req.file.originalname,
-                filename: fileKey,
-                fileUrl: uploadResult.url,
-                isLocalStorage: uploadResult.isLocal,
-                size: req.file.size,
-                mimetype: req.file.mimetype,
-                description: 'Image uploaded successfully',
-                detectedObjects: [],
-                objectCategories: [],
-                analysisTimestamp: null,
-                uploadedAt: new Date().toISOString(),
-                error: 'Object detection failed'
-            };
+                // Store in MongoDB
+                try {
+                    const result = await photosCollection.insertOne({
+                        _id: photoId,
+                        filename: uploadResult.key,
+                        fileUrl: uploadResult.url,
+                        isLocalStorage: uploadResult.isLocal,
+                        description: description,
+                        metadata: metadata,
+                        created_at: new Date()
+                    });
 
-            try {
-                const result = await photosCollection.insertOne({
-                    _id: photoId,
+                    console.log('MongoDB save successful:', result.insertedId);
+
+                    return res.json({
+                        success: true,
+                        data: metadata
+                    });
+                } catch (dbError) {
+                    console.error('Database error:', dbError);
+                    return res.status(500).json({ success: false, error: 'Database error: ' + dbError.message });
+                }
+            } catch (aiError) {
+                console.error('Error processing image with AI:', aiError);
+
+                // Fallback to basic metadata if AI processing fails
+                const metadata = {
+                    id: photoId,
+                    originalName: req.file.originalname,
                     filename: fileKey,
                     fileUrl: uploadResult.url,
                     isLocalStorage: uploadResult.isLocal,
-                    description: metadata.description,
-                    metadata: metadata,
-                    created_at: new Date()
-                });
+                    size: req.file.size,
+                    mimetype: req.file.mimetype,
+                    description: 'Image uploaded successfully',
+                    detectedObjects: [],
+                    objectCategories: [],
+                    analysisTimestamp: null,
+                    uploadedAt: new Date().toISOString(),
+                    error: 'Object detection failed'
+                };
 
-                return res.json({
-                    success: true,
-                    data: metadata
-                });
-            } catch (dbError) {
-                console.error('Database error:', dbError);
-                return res.status(500).json({ success: false, error: 'Database error' });
+                try {
+                    const result = await photosCollection.insertOne({
+                        _id: photoId,
+                        filename: fileKey,
+                        fileUrl: uploadResult.url,
+                        isLocalStorage: uploadResult.isLocal,
+                        description: metadata.description,
+                        metadata: metadata,
+                        created_at: new Date()
+                    });
+
+                    return res.json({
+                        success: true,
+                        data: metadata
+                    });
+                } catch (dbError) {
+                    console.error('Database error:', dbError);
+                    return res.status(500).json({ success: false, error: 'Database error' });
+                }
             }
+        } catch (error) {
+            console.error('Error processing image:', error);
+            return res.status(500).json({ success: false, error: 'Server error: ' + (error.message || 'Unknown error') });
         }
     } catch (error) {
         console.error('Unexpected error in upload endpoint:', error);
@@ -430,9 +454,11 @@ app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
 // Function to upload file to Vercel Blob
 async function uploadFileToBlob(file, filename) {
     try {
+        console.log('Starting file upload to Vercel Blob:', filename);
+
         // If we're in development mode and don't have Blob token, fallback to local storage
-        if (process.env.NODE_ENV !== 'production' && !process.env.BLOB_READ_WRITE_TOKEN) {
-            console.log('Vercel Blob token not found, using local filesystem in development mode');
+        if (!process.env.BLOB_READ_WRITE_TOKEN) {
+            console.log('Vercel Blob token not found, using local filesystem');
             return {
                 isLocal: true,
                 key: file.filename,
@@ -445,12 +471,13 @@ async function uploadFileToBlob(file, filename) {
         const fileExtension = path.extname(file.originalname);
         const blobName = `${filename}${fileExtension}`;
 
-        console.log(`Uploading ${blobName} to Vercel Blob...`);
+        console.log(`Uploading ${blobName} to Vercel Blob with token length: ${process.env.BLOB_READ_WRITE_TOKEN.length}`);
 
         // Upload to Vercel Blob
         const blob = await put(blobName, fileData, {
             access: 'public',
-            contentType: file.mimetype
+            contentType: file.mimetype,
+            token: process.env.BLOB_READ_WRITE_TOKEN
         });
 
         console.log(`Upload successful: ${blob.url}`);
@@ -469,6 +496,8 @@ async function uploadFileToBlob(file, filename) {
         };
     } catch (error) {
         console.error('Error uploading to Vercel Blob:', error);
+        console.error('Error details:', JSON.stringify(error, Object.getOwnPropertyNames(error)));
+
         // Fallback to local file if Blob upload fails
         return {
             isLocal: true,
